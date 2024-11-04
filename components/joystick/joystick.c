@@ -4,7 +4,6 @@ static const char *TAG = "[JOYSTICK]";
 static volatile bool button_pressed = false;
 static uint32_t last_button_time = 0;
 
-QueueHandle_t joystick_read_queue;
 QueueHandle_t joystick_output_queue;
 QueueHandle_t joystick_button_queue;
 
@@ -34,6 +33,10 @@ static bool on_conv_done(adc_continuous_handle_t handle, const adc_continuous_ev
     if (adc_continuous_read(handle, adc_read_buf, sizeof(adc_read_buf), &out_size, 0) == ESP_OK)
     {
         int32_t adc_1_data = 0, adc_2_data = 0;
+        static int movement_id = 0;
+        const int FAST_INTERVAL_MS = 200, SLOW_INTERVAL_MS = 800;
+        static int64_t last_event_time_fast = 0, last_event_time_slow = 0;
+        int64_t current_time = esp_timer_get_time() / 1000;
 
         for (int i = 0; i < out_size; i += SOC_ADC_DIGI_RESULT_BYTES)
         {
@@ -48,11 +51,53 @@ static bool on_conv_done(adc_continuous_handle_t handle, const adc_continuous_ev
             }
         }
 
-        input_event_t joystick_event = {.type = JOYSTICK_EVENT, .x_data = adc_1_data, .y_data = adc_2_data, .button_state = false};
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xQueueSendFromISR(joystick_read_queue, &joystick_event, &xHigherPriorityTaskWoken);
+        // Check for joystick movements
+        bool movement_detected = false;
+        int movement_interval = SLOW_INTERVAL_MS;
 
-        return xHigherPriorityTaskWoken == pdTRUE;
+        for (int i = 0; i < sizeof(joystick_movements) / sizeof(joystick_movements[0]); i++)
+        {
+            joystick_movement_t movement = joystick_movements[i];
+            if ((adc_1_data >= movement.x_min_threshold && adc_1_data <= movement.x_max_threshold) &&
+                (adc_2_data >= movement.y_min_threshold && adc_2_data <= movement.y_max_threshold))
+            {
+                movement_detected = true;
+                movement_id = movement.movement_id;
+                movement_interval = (movement_id % 2 == 1) ? FAST_INTERVAL_MS : SLOW_INTERVAL_MS;
+                break;
+            }
+        }
+
+        if (movement_detected)
+        {
+            if ((movement_interval == FAST_INTERVAL_MS && current_time - last_event_time_fast >= FAST_INTERVAL_MS) ||
+                (movement_interval == SLOW_INTERVAL_MS && current_time - last_event_time_slow >= SLOW_INTERVAL_MS))
+            {
+                if (movement_id != 0)
+                {
+                    xQueueSendFromISR(joystick_output_queue, &movement_id, NULL);
+                }
+                if (movement_interval == FAST_INTERVAL_MS)
+                {
+                    last_event_time_fast = current_time;
+                }
+                else
+                {
+                    last_event_time_slow = current_time;
+                }
+            }
+        }
+
+        // Handle button event if applicable
+        if (button_pressed && current_time - last_event_time_slow >= DEBOUNCE_DELAY)
+        {
+            uint8_t btn_press = 1;
+            ESP_LOGI(TAG, "Button Pressed");
+            xQueueSendFromISR(joystick_button_queue, &btn_press, NULL);
+            last_event_time_slow = current_time;
+        }
+
+        return pdFALSE; // ISR already handles context switch if needed
     }
     return false;
 }
@@ -64,14 +109,7 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
 
     if (current_time - last_button_time >= DEBOUNCE_DELAY)
     {
-        input_event_t button_event = {.type = BUTTON_EVENT, .button_state = (level == 0), .x_data = 0, .y_data = 0};
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xQueueSendFromISR(joystick_read_queue, &button_event, &xHigherPriorityTaskWoken);
-
-        if (xHigherPriorityTaskWoken)
-        {
-            portYIELD_FROM_ISR();
-        }
+        button_pressed = (level == 0);
         last_button_time = current_time;
     }
 }
@@ -82,88 +120,21 @@ void init_button_interrupt()
     gpio_isr_handler_add(SW_PIN, gpio_isr_handler, (void *)SW_PIN);
 }
 
-void joystick_read(void *pvParameters)
+void joystick_init(void *pvParameter)
 {
-    input_event_t received_event;
-    int movement_id = 0;
-    const int FAST_INTERVAL_MS = 200, SLOW_INTERVAL_MS = 800;
-    int64_t last_event_time_fast = esp_timer_get_time() / 1000;
-    int64_t last_event_time_slow = esp_timer_get_time() / 1000;
-
-    while (1)
-    {
-        if (xQueueReceive(joystick_read_queue, &received_event, portMAX_DELAY) == pdTRUE)
-        {
-            int64_t current_time = esp_timer_get_time() / 1000;
-
-            if (received_event.type == JOYSTICK_EVENT)
-            {
-                bool movement_detected = false;
-                int movement_interval = SLOW_INTERVAL_MS;
-
-                for (int i = 0; i < sizeof(joystick_movements) / sizeof(joystick_movements[0]); i++)
-                {
-                    joystick_movement_t movement = joystick_movements[i];
-                    if ((received_event.x_data >= movement.x_min_threshold && received_event.x_data <= movement.x_max_threshold) &&
-                        (received_event.y_data >= movement.y_min_threshold && received_event.y_data <= movement.y_max_threshold))
-                    {
-                        movement_detected = true;
-                        movement_id = movement.movement_id;
-                        movement_interval = (movement_id % 2 == 1) ? FAST_INTERVAL_MS : SLOW_INTERVAL_MS;
-                        break;
-                    }
-                }
-
-                if (movement_detected)
-                {
-                    if ((movement_interval == FAST_INTERVAL_MS && current_time - last_event_time_fast >= FAST_INTERVAL_MS) ||
-                        (movement_interval == SLOW_INTERVAL_MS && current_time - last_event_time_slow >= SLOW_INTERVAL_MS))
-                    {
-                        if (movement_id != 0)
-                        {
-                            xQueueSend(joystick_output_queue, &movement_id, portMAX_DELAY);
-                        }
-                        if (movement_interval == FAST_INTERVAL_MS)
-                        {
-                            last_event_time_fast = current_time;
-                        }
-                        else
-                        {
-                            last_event_time_slow = current_time;
-                        }
-                    }
-                }
-            }
-            else if (received_event.type == BUTTON_EVENT && received_event.button_state && current_time - last_event_time_slow)
-            {
-                uint8_t btn_press = 1;
-                ESP_LOGI(TAG, "Button Pressed");
-                xQueueSend(joystick_button_queue, &btn_press, portMAX_DELAY);
-                last_event_time_slow = current_time;
-            }
-        }
-    }
-}
-
-void joystick_init(void *pvParamater)
-{
-    joystick_read_queue = xQueueCreate(1, sizeof(input_event_t));
     joystick_output_queue = xQueueCreate(1, sizeof(int));
     joystick_button_queue = xQueueCreate(1, sizeof(uint8_t));
-    if (joystick_read_queue == NULL)
+    if (joystick_output_queue == NULL || joystick_button_queue == NULL)
     {
         ESP_LOGE(TAG, "Failed to create queue");
         return;
     }
 
-    xTaskCreate(joystick_read, "joystick_read", 4096, NULL, 10, NULL);
-
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << SW_PIN),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
-        .intr_type = GPIO_INTR_ANYEDGE};
-
+        .intr_type = GPIO_INTR_NEGEDGE};
     gpio_config(&io_conf);
     init_button_interrupt();
 

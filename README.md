@@ -2,12 +2,17 @@
 
 This project controls an 8x8 LED matrix using an ESP32, daisy-chained shift registers, and a joystick. The matrix uses a common anode setup, where rows are connected to ground, and columns are supplied with positive voltage to turn on individual LEDs. The shift registers are daisy-chained and controlled using 16-bit arrays for seamless row and column management.
 
+### LINK TO TINKERCAD:
+https://www.tinkercad.com/things/ddNH6rkFrTO-swanky-borwo-turing/editel?returnTo=https%3A%2F%2Fwww.tinkercad.com%2Fdashboard&sharecode=kVij87tV3eTlETzdEKaGeMQLisVexylZjX0EUOX_Ow4
+
 ## Pin Definitions
 
 ### Joystick ADC Pins
 - **SW_PIN**: GPIO 15  
 - **ADC_1**: ADC1 Channel 1 (GPIO 2) - X-axis input
 - **ADC_2**: ADC1 Channel 2 (GPIO 3) - Y-axis input
+- **GND_PIN**: Ground
+- **VCC_PIN**: 3.3V
 
 ### Shift Register Pins
 - **SER_PIN**: GPIO 41 - Serial Data Input

@@ -6,8 +6,10 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
 
 // Pin definitions
 #define SW_PIN GPIO_NUM_15
